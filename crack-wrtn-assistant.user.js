@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 캐릭터챗 어시스턴트
 // @namespace    https://crack.wrtn.ai/
-// @version      2.36.0
+// @version      2.39.0
 // @description  crack.wrtn.ai 캐릭터챗의 채팅 로그·유저노트·요약메모리·대화프로필을 읽어 Gemini API / Firebase AI Logic 에게 질문하는 도우미
 // @author       extensionCode
 // @match        https://crack.wrtn.ai/*
@@ -20,7 +20,7 @@
 (function () {
   'use strict';
 
-  const CWA_VERSION = '2.36.0';
+  const CWA_VERSION = '2.39.0';
   let usdKrw = 1400;   // USD→KRW 환율 — open.er-api.com 에서 자동 갱신(1시간 캐시), 실패 시 이 기본값
 
   /* =========================================================================
@@ -76,6 +76,8 @@
   let messagesAccum = [];
   let messagesSeen = {};
   let messagesChatId = null;
+  let messagesHasNext = false;       // 더 가져올 과거 페이지가 있는지
+  let messagesNextCursor = null;     // 다음(미수집) 페이지 커서 — 이어받기 재개점
   function mergeMessages(list) {
     if (!Array.isArray(list)) return 0;
     let added = 0;
@@ -91,6 +93,19 @@
     messagesChatId = cid;            // 채팅방이 바뀌면 초기화 (메시지는 영구저장 안 함)
     messagesAccum = [];
     messagesSeen = {};
+    messagesHasNext = false;
+    messagesNextCursor = null;
+  }
+  // 보낼 메시지 수를 늘렸을 때 모아둔 양이 부족하면 과거 페이지를 더 이어받는다.
+  // (커서로 재개 → recordCapture 가 새 target 까지 자동으로 마저 페이지네이션)
+  function ensureMoreMessages() {
+    const want = Math.min(2000, (Number(settings.msgCount) || 20) + 20);
+    if (messagesAccum.length >= want) return;
+    if (!messagesHasNext || !messagesNextCursor) return;
+    const cid = getChatId();
+    if (!cid) return;
+    proactiveFetch('https://crack-api.wrtn.ai/crack-gen/v3/chats/' + cid +
+      '/messages?limit=20&cursor=' + encodeURIComponent(messagesNextCursor));
   }
 
   function recordCapture(url, status, body) {
@@ -127,7 +142,9 @@
       syncMessagesChat();
       if (capCid && capCid === messagesChatId) {
         const added = mergeMessages(json.data.messages);
-        const target = Math.min(220, (Number(settings.msgCount) || 20) + 20);
+        messagesHasNext = !!json.data.hasNext;
+        messagesNextCursor = json.data.nextCursor || null;
+        const target = Math.min(2000, (Number(settings.msgCount) || 20) + 20);
         if (json.data.hasNext && json.data.nextCursor && added > 0 && messagesAccum.length < target) {
           const baseUrl = rec.url.split(/[?&]cursor=/)[0];
           proactiveFetch(baseUrl + (baseUrl.indexOf('?') >= 0 ? '&' : '?') +
@@ -261,7 +278,6 @@
     sendUserNote: true,
     sendMemory: true,
     // 기타
-    debug: false,
     iconLeft: null,
     iconTop: null,
   };
@@ -784,10 +800,6 @@
       '.cwa-fieldset{display:flex;flex-direction:column;gap:8px;border:1px solid #e6e7f0;border-radius:10px;padding:10px;}',
       '.cwa-hide{display:none!important;}',
       '.cwa-foot{font-size:11px;color:#b7bac6;text-align:center;padding:2px 0 4px;}',
-      '.cwa-cap{border:1px solid #e6e7f0;border-radius:8px;padding:6px 8px;font-size:11px;}',
-      '.cwa-cap b{font-size:11px;color:#3a3f52;word-break:break-all;}',
-      '.cwa-cap pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-all;max-height:90px;overflow:auto;',
-      '  background:#f6f6fb;border-radius:6px;padding:5px;color:#5b6072;}',
       '</style>',
 
       '<div class="cwa">',
@@ -802,8 +814,8 @@
       /* ---- 메인 ---- */
       '    <div class="cwa-body" id="cwa-main">',
       '      <div class="cwa-row">',
-      '        <span class="cwa-muted">채팅 로그 보낼 메시지</span>',
-      '        <input type="number" id="cwa-send-n" min="1" max="100" step="1">',
+      '        <span class="cwa-muted">채팅 로그 보낼 메시지 (최근)</span>',
+      '        <input type="number" id="cwa-send-n" min="1" step="1">',
       '        <span class="cwa-muted" style="font-size:10px;">왕복 1회 = 메시지 2개</span>',
       '      </div>',
       '      <div class="cwa-row">',
@@ -870,27 +882,11 @@
       '        <label class="cwa-lbl">시스템 프롬프트</label>',
       '        <textarea id="cwa-sysprompt" style="min-height:110px;"></textarea>',
       '      </div>',
-      '      <label class="cwa-chk"><input type="checkbox" id="cwa-debug">디버그(캡처된 API) 보기 버튼 표시</label>',
       '      <div style="display:flex;gap:8px;">',
       '        <button class="cwa-btn" id="cwa-save" style="flex:1;">저장</button>',
       '        <button class="cwa-btn sec" id="cwa-reset-prompt">프롬프트 기본값</button>',
       '      </div>',
-      '      <button class="cwa-btn sec cwa-hide" id="cwa-open-debug">캡처된 API 보기</button>',
       '      <div class="cwa-muted" id="cwa-save-msg"></div>',
-      '    </div>',
-
-      /* ---- 디버그 ---- */
-      '    <div class="cwa-body cwa-hide" id="cwa-debug-view">',
-      '      <div class="cwa-row" style="justify-content:space-between;">',
-      '        <span class="cwa-muted">crack-api.wrtn.ai 캡처: <b id="cwa-cap-n">0</b>건</span>',
-      '        <span style="display:flex;gap:6px;">',
-      '          <button class="cwa-btn sec" id="cwa-cap-refresh" style="padding:4px 8px;font-size:11px;">새로고침</button>',
-      '          <button class="cwa-btn sec" id="cwa-cap-copy" style="padding:4px 8px;font-size:11px;">전체 복사</button>',
-      '        </span>',
-      '      </div>',
-      '      <div class="cwa-muted">데이터 추출에 문제가 있을 때 이 목록을 복사해 개발자에게 보내면 도움이 됩니다.</div>',
-      '      <div id="cwa-cap-list" style="display:flex;flex-direction:column;gap:6px;"></div>',
-      '      <button class="cwa-btn sec" id="cwa-debug-back">← 설정으로</button>',
       '    </div>',
 
       /* ---- 전송 내용 미리보기 ---- */
@@ -915,7 +911,7 @@
     const panelEl = $('cwa-panel');
     const views = {
       main: $('cwa-main'), settings: $('cwa-settings'),
-      debug: $('cwa-debug-view'), preview: $('cwa-preview-view'),
+      preview: $('cwa-preview-view'),
     };
 
     /* ---- 뷰 전환 ---- */
@@ -924,11 +920,10 @@
         views[k].classList.toggle('cwa-hide', k !== name);
       });
       $('cwa-title').textContent =
-        name === 'settings' ? '설정' : name === 'debug' ? '캡처된 API'
+        name === 'settings' ? '설정'
         : name === 'preview' ? '전송 내용 미리보기' : '캐릭터챗 어시스턴트';
       if (name === 'main') refreshMain();
       if (name === 'settings') fillSettingsForm();
-      if (name === 'debug') renderCaptures();
       if (name === 'preview') renderPreview();
       positionPanel();
     }
@@ -1058,7 +1053,7 @@
         got.push('요약메모리(' + Math.min(tot, n) + '/' + tot + ')');
       }
       // 이번 질문에 실릴 입력 대략 크기 — 크면 줄이라는 신호
-      const cnt = Math.max(1, Math.min(100, parseInt($('cwa-send-n').value, 10) || settings.msgCount));
+      const cnt = Math.max(1, parseInt($('cwa-send-n').value, 10) || settings.msgCount);
       const estK = Math.round(buildUserText(chat, '', cnt).length / 1000);
       $('cwa-attach-info').textContent = (got.length ? ('첨부: ' + got.join(', ')) : '※ 데이터 로딩 중…')
         + '  ·  입력 ≈' + estK + 'k자';
@@ -1197,7 +1192,7 @@
 
     // 한 턴 실행: turn.q 를 현재 컨텍스트로 질의, priorTurns 를 대화 맥락으로 첨부
     async function runTurn(turn, priorTurns) {
-      const count = Math.max(1, Math.min(100, parseInt($('cwa-send-n').value, 10) || settings.msgCount));
+      const count = Math.max(1, parseInt($('cwa-send-n').value, 10) || settings.msgCount);
       settings.msgCount = count;
       settings.sendPersona = $('cwa-c-persona').checked;
       settings.sendUserNote = $('cwa-c-note').checked;
@@ -1239,6 +1234,12 @@
       if (busy) return;
       const question = $('cwa-q').value.trim();
       if (!question) { $('cwa-q').focus(); return; }
+      // 채팅 로그가 많으면 토큰 비용·응답시간 경고
+      const askCount = Math.max(1, parseInt($('cwa-send-n').value, 10) || settings.msgCount);
+      if (askCount > 200 && !window.confirm(
+        '채팅 로그 ' + askCount + '개를 전송합니다.\n\n' +
+        '메시지가 많을수록 토큰 비용과 응답 시간이 크게 늘어납니다.\n' +
+        '이대로 보낼까요?')) { $('cwa-q').focus(); return; }
       syncThread();   // 현재 채팅방 스레드 보장
       const entry = { q: question, a: '', t: Date.now() };
       const prior = thread.slice(-HISTORY_TURNS);
@@ -1261,8 +1262,6 @@
       // 유저가 붙여넣은 원본 그대로 표시 (없으면 옛 저장분은 재구성으로 폴백)
       $('cwa-fb-paste').value = settings.fbRaw || fbConfigText();
       $('cwa-sysprompt').value = settings.systemPrompt;
-      $('cwa-debug').checked = settings.debug;
-      $('cwa-open-debug').classList.toggle('cwa-hide', !settings.debug);
       showFbStatus();
       updateProviderFields();
     }
@@ -1323,51 +1322,12 @@
       settings.provider = $('cwa-provider').value;
       settings.geminiKey = $('cwa-gemini-key').value.trim();
       settings.systemPrompt = $('cwa-sysprompt').value.trim() || DEFAULT_SYSTEM_PROMPT;
-      settings.debug = $('cwa-debug').checked;
       saveSettings(settings);
-    }
-
-    /* ---- 디버그(캡처) ---- */
-    function renderCaptures() {
-      $('cwa-cap-n').textContent = String(apiCaptures.length);
-      const list = $('cwa-cap-list');
-      list.textContent = '';
-      if (!apiCaptures.length) {
-        const d = document.createElement('div');
-        d.className = 'cwa-muted';
-        d.textContent = '아직 캡처된 API 가 없습니다. 채팅방을 새로고침하고 패널들을 열어보세요.';
-        list.appendChild(d);
-        return;
-      }
-      apiCaptures.slice().reverse().forEach(function (c) {
-        const box = document.createElement('div');
-        box.className = 'cwa-cap';
-        const b = document.createElement('b');
-        b.textContent = '[' + c.status + '] ' + c.key.replace('https://crack-api.wrtn.ai', '');
-        const pre = document.createElement('pre');
-        let js = '';
-        try { js = JSON.stringify(c.json); } catch (e) { js = '(직렬화 불가)'; }
-        pre.textContent = js.slice(0, 500) + (js.length > 500 ? ' …' : '');
-        box.appendChild(b);
-        box.appendChild(pre);
-        list.appendChild(box);
-      });
-    }
-    function copyAllCaptures() {
-      const dump = apiCaptures.map(function (c) {
-        let js = '';
-        try { js = JSON.stringify(c.json); } catch (e) { js = '(err)'; }
-        return '### ' + c.status + ' ' + c.url + '\n' + js;
-      }).join('\n\n');
-      navigator.clipboard && navigator.clipboard.writeText(dump).then(function () {
-        const b = $('cwa-cap-copy'); b.textContent = '복사됨';
-        setTimeout(function () { b.textContent = '전체 복사'; }, 1200);
-      });
     }
 
     /* ---- 전송 내용 미리보기 ---- */
     function renderPreview() {
-      const cnt = Math.max(1, Math.min(100, parseInt($('cwa-send-n').value, 10) || settings.msgCount));
+      const cnt = Math.max(1, parseInt($('cwa-send-n').value, 10) || settings.msgCount);
       const f = getFeatures();
       const chat = scrapeChat();
       const L = [];
@@ -1457,10 +1417,11 @@
         settings[key] = v;
         $(id).value = v;
         saveSettings(settings);
+        if (key === 'msgCount') ensureMoreMessages();  // 늘렸으면 과거 메시지 더 수집
         refreshMain();
       });
     }
-    wireCountInput('cwa-send-n', 'msgCount', 1, 100);
+    wireCountInput('cwa-send-n', 'msgCount', 1, 99999);   // 상한 없음(사실상)
     wireCountInput('cwa-memcount', 'memoryCount', 1, 999);
     $('cwa-provider').addEventListener('change', updateProviderFields);
     // firebaseConfig 입력 중에는 상태만 표시, 실제 반영은 [저장] 시
@@ -1468,18 +1429,11 @@
     $('cwa-reset-prompt').addEventListener('click', function () {
       $('cwa-sysprompt').value = DEFAULT_SYSTEM_PROMPT;
     });
-    $('cwa-debug').addEventListener('change', function () {
-      $('cwa-open-debug').classList.toggle('cwa-hide', !$('cwa-debug').checked);
-    });
     $('cwa-save').addEventListener('click', function () {
       applySettingsForm();
       $('cwa-save-msg').textContent = '저장되었습니다 ✓';
       setTimeout(function () { $('cwa-save-msg').textContent = ''; }, 1800);
     });
-    $('cwa-open-debug').addEventListener('click', function () { showView('debug'); });
-    $('cwa-debug-back').addEventListener('click', function () { showView('settings'); });
-    $('cwa-cap-refresh').addEventListener('click', renderCaptures);
-    $('cwa-cap-copy').addEventListener('click', copyAllCaptures);
     $('cwa-preview').addEventListener('click', function () { showView('preview'); });
     $('cwa-prev-back').addEventListener('click', function () { showView('main'); });
     $('cwa-prev-copy').addEventListener('click', function () {
